@@ -39,6 +39,7 @@
 #define USART_CR1 0x00
 #define USART_BRR 0x0C
 #define USART_TDR 0x28
+#define USART_RDR 0x24
 #define USART_ISR 0x1C
 
 #define TIM1_CR1 0x00

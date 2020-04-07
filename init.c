@@ -92,3 +92,10 @@ void Default_Handler()
 {
 	while(1);
 }
+
+void* memcpy(void *dest, const void *src, unsigned int count ) {
+    for (int i = 0; i < count; i++) {
+        ((char*)dest)[i] = ((char*)src)[i];
+    }
+    return dest;
+}
