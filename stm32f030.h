@@ -22,6 +22,7 @@
 
 #define GPIO_MODER 0x00
 #define GPIO_TYPER 0x04
+#define GPIO_PUPDR 0x0C
 #define GPIO_IDR 0x10
 #define GPIO_ODR 0x14
 #define GPIO_BSRR 0x18

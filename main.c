@@ -12,10 +12,19 @@
 #define I2C_READ_NACK 1
 #define I2C_READ_ACK_ON_CTS 2
 
+#define MODE_OFF 0
+#define MODE_FM 1
+#define MODE_AM 2
+
 char hex[] = "0123456789ABCDEF";
 short adc[8];
 
 int respBytesExpected = 0;
+int mode = MODE_OFF;
+
+unsigned char response[16];
+
+unsigned long args = 0;
 
 void uartEnable() {
     REG_L(GPIOA_BASE, GPIO_MODER) |= (2 << (9 * 2)); // PA9 alternate function (TX)
@@ -124,24 +133,24 @@ void i2cDelay() {
 
 void i2cScl(char v) {
     if (v) {
-        REG_L(GPIOA_BASE, GPIO_ODR) |= 0x20;
+        REG_L(GPIOA_BASE, GPIO_ODR) |= (1 << 13);
     } else {
-        REG_L(GPIOA_BASE, GPIO_ODR) &= ~0x20;
+        REG_L(GPIOA_BASE, GPIO_ODR) &= ~(1 << 13);
     }
     i2cDelay();
 }
 
 void i2cSda(char v) {
     if (v) {
-        REG_L(GPIOA_BASE, GPIO_ODR) |= 0x40;
+        REG_L(GPIOB_BASE, GPIO_ODR) |= (1 << 1);
     } else {
-        REG_L(GPIOA_BASE, GPIO_ODR) &= ~0x40;
+        REG_L(GPIOB_BASE, GPIO_ODR) &= ~(1 << 1);
     }
     i2cDelay();
 }
 
 char i2cPeek() {
-    return (REG_L(GPIOA_BASE, GPIO_IDR) >> 6) & 1;
+    return (REG_L(GPIOB_BASE, GPIO_IDR) >> 1) & 1;
 }
 
 void i2cStart() {
@@ -201,27 +210,29 @@ int i2cReceive(char n, char a) {
 }
 
 void radioStatus() {
+    int i = 0;
     i2cStart();
     i2cSend((RADIO_I2C_ADDR << 1) | 1, 8);
-    int status = i2cReceive(8,
+    response[0] = i2cReceive(8,
         respBytesExpected > 0
             ? I2C_READ_ACK_ON_CTS
             : I2C_READ_NACK);
-    sends("READ: ");
-    sendHex(status, 2);
-    if ((status & 0x80) != 0) {
-        while (respBytesExpected > 0) {
-            int b = i2cReceive(8,
-                respBytesExpected > 1
+    if ((response[0] & 0x80) != 0) {
+        for (int i = 1; i <= respBytesExpected; i += 1) {
+            response[i] = i2cReceive(8,
+                i < respBytesExpected
                 ? I2C_READ_ACK
                 : I2C_READ_NACK);
-            send('.');
-            sendHex(b, 2);
-            respBytesExpected -= 1;
         }
     }
-    send('\n');
     i2cStop();
+    sends("READ: ");
+    for (int i = 0; i <= respBytesExpected; i+= 1) {
+        send('.');
+        sendHex(response[i], 2);
+    }
+    send('\n');
+    respBytesExpected = 0;
 }
 
 void radioCommand(int toSend, int toRead, unsigned char* data) {
@@ -237,9 +248,13 @@ void radioCommand(int toSend, int toRead, unsigned char* data) {
     respBytesExpected = toRead;
 }
 
-void radioOn() {
-    unsigned char b[] = {0x01, 0x00, 0x05};
+void radioOn(int am) {
+    unsigned char b[] = {0x01, 0x00 + am, 0x05};
+    sends("Power Up (");
+    send(am ? 'A' : 'F');
+    sends("M)\n");
     radioCommand(3, 0, b);
+    mode = am ? MODE_AM : MODE_FM;
 }
 
 void radioVersion() {
@@ -248,13 +263,40 @@ void radioVersion() {
 }
 
 void radioOff() {
+    sends("Power Down\n");
     unsigned char b[] = {0x11};
     radioCommand(1, 0, b);
+    mode = MODE_OFF;
+}
+
+void radioSeekFm(int up) {
+    unsigned char b[] = {0x21, (up << 3) | 0x04};
+    radioCommand(2, 0, b);
+}
+
+void radioSeekSw(int up) {
+    unsigned char b[] = {0x41, (up << 3) | 0x04, 0x00, 0x00, 0x00, 0x00};
+    radioCommand(6, 0, b);
 }
 
 void radioSeek(int up) {
-    unsigned char b[] = {0x21, (up << 3) | 0x04};
-    radioCommand(2, 0, b);
+    sends("Seek ");
+    if (up) {
+        sends("next");
+    } else {
+        sends("prev");
+    }
+    sends("\n");
+    switch (mode) {
+        case MODE_FM:
+            radioSeekFm(up);
+            break;
+        case MODE_AM:
+            radioSeekSw(up);
+            break;
+        default:
+            sends("Can't seek when OFF\n");
+    }
 }
 
 void radioGetInts() {
@@ -263,17 +305,41 @@ void radioGetInts() {
 }
 
 void radioGetTune(int clear) {
-    unsigned char b[] = {0x22, 0x00 | clear};
+    unsigned char b[] = {mode == MODE_AM ? 0x42 : 0x22, 0x00 | clear};
     radioCommand(2, 7, b);
 }
 
+void radioTune() {
+    unsigned char b[] = {0x20, 0x00, 0x00, 0x00, 0x00};
+    b[2] = (unsigned char) (args >> 8);
+    b[3] = (unsigned char) args;
+    radioCommand(5, 0, b);
+}
+
+void writeProperty() {
+    unsigned char b[] = {0x12, 0x00, 0x00, 0x00, 0x00, 0x00};
+    for (int i = 0; i < 4; i++) {
+        b[5 - i] = (unsigned char) (args >> (i * 8));
+    }
+    radioCommand(6, 0, b);
+}
+
 void doCommand(int key) {
+    if (key >= '0' && key <= '9' || key >= 'A' && key <= 'F') {
+        args = (args << 4) + (key <= '9' ? key - '0' : key - 'A' + 10);
+        sendHex(args, 8);
+        sends("\n");
+        return;
+    }
     switch (key) {
         case 's':
             radioStatus();
             break;
         case 'u':
-            radioOn();
+            radioOn(0);
+            break;
+        case 'U':
+            radioOn(1);
             break;
         case 'd':
             radioOff();
@@ -283,6 +349,9 @@ void doCommand(int key) {
             break;
         case 'p':
             radioSeek(0);
+            break;
+        case 't':
+            radioTune();
             break;
         case 'g':
             radioGetInts();
@@ -296,6 +365,9 @@ void doCommand(int key) {
         case 'v':
             radioVersion();
             break;
+        case 'w':
+            writeProperty();
+            break;
     }
 }
 
@@ -305,22 +377,26 @@ int main() {
     clockSetup();
     
     REG_L(RCC_BASE, RCC_AHBENR) |= (1 << 17); // port A clock
+    REG_L(RCC_BASE, RCC_AHBENR) |= (1 << 18); // port B clock
     
-    REG_L(GPIOA_BASE, GPIO_MODER) |= 1 << (3 * 2); // pa3 output (rst)
+    REG_L(GPIOA_BASE, GPIO_MODER) = 1 << (14 * 2); // pa14 output (rst)
     REG_L(GPIOA_BASE, GPIO_MODER) |= 1 << (4 * 2); // pa4 output (led)
-    REG_L(GPIOA_BASE, GPIO_MODER) |= 1 << (5 * 2); // pa5 output (scl)
-    REG_L(GPIOA_BASE, GPIO_MODER) |= 1 << (6 * 2); // pa6 output (sda)
-    REG_L(GPIOA_BASE, GPIO_TYPER) |= (1 << 5) | (1 << 6); // pa5, pa6 open-drain
+    REG_L(GPIOA_BASE, GPIO_MODER) |= 1 << (13 * 2); // pa13 output (scl)
+    REG_L(GPIOA_BASE, GPIO_TYPER) |= (1 << 13); // pa13 open-drain
+    REG_L(GPIOA_BASE, GPIO_PUPDR) = 1 << (13 * 2); // pa13 pull-up
+    REG_L(GPIOB_BASE, GPIO_MODER) |= 1 << (1 * 2); // pb1 output (sda)
+    REG_L(GPIOB_BASE, GPIO_TYPER) |= (1 << 1); // pb1 open-drain
+    REG_L(GPIOB_BASE, GPIO_PUPDR) = 1 << (1 * 2); // pb1 pull-up
     
     uartEnable();
     
     pwm32khzSetup();
     
-    REG_L(GPIOA_BASE, GPIO_BSRR) |= (1 << (16 + 3)); // reset low
+    REG_L(GPIOA_BASE, GPIO_BSRR) |= (1 << (16 + 14)); // reset low
     i2cScl(1);
     i2cSda(1);
     n = 1000; while(--n);
-    REG_L(GPIOA_BASE, GPIO_BSRR) |= (1 << 3); // reset high
+    REG_L(GPIOA_BASE, GPIO_BSRR) |= (1 << 14); // reset high
     n = 1000; while(--n);
     
     int addr = 0;
